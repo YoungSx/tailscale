@@ -4434,7 +4434,8 @@ func (b *LocalBackend) suspendLaggingWatchSessionLocked(sess *watchSession) {
 // into full-Node [Notify.PeersChanged] entries for sessions that asked
 // for peer changes but not patches, and tracking on sess which
 // [tailcfg.UserProfileView]s have already been delivered so subsequent
-// sends only carry new/changed profiles.
+// sends only carry new/changed profiles. Finally, it runs the extensions'
+// [ipnext.Hooks.MutateNotifyForSessionLocked] hooks, if any, on the result.
 //
 // The returned pointer is either n itself (no adjustments needed for
 // this session) or a fresh *ipn.Notify with the adjusted fields. The
@@ -4492,7 +4493,6 @@ func (b *LocalBackend) notifyForSessionLocked(sess *watchSession, n *ipn.Notify)
 		return n
 	}
 	nCopy := *n
-
 	if stripPeersChanged {
 		nCopy.PeersChanged = nil
 	}
