@@ -11,6 +11,7 @@ package rate
 
 import (
 	"math"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -148,6 +149,64 @@ func TestSimultaneousRequests(t *testing.T) {
 func BenchmarkAllowN(b *testing.B) {
 	lim := NewLimiter(Every(1*time.Second), 1)
 	now := mono.Now()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			lim.allow(now)
+		}
+	})
+}
+
+// TestAllowFastPath checks that allow's lock-free denials (see
+// [Limiter.next]) decide the same as the token bucket alone would.
+func TestAllowFastPath(t *testing.T) {
+	for _, tc := range []struct {
+		limit Limit
+		burst int
+	}{
+		{Every(10 * time.Second), 3},
+		{Every(time.Millisecond), 10},
+		{Every(time.Second), 1},
+		{1e6, 5},
+	} {
+		lim := NewLimiter(tc.limit, tc.burst)
+		// The bucket alone, as allow is without the fast path.
+		tokens, last := 0.0, mono.Time(0)
+		ref := func(now mono.Time) bool {
+			tok := math.Min(tokens+float64(tc.limit)*now.Sub(last).Seconds(), float64(tc.burst)) - 1
+			if tok < 0 {
+				return false
+			}
+			tokens, last = tok, now
+			return true
+		}
+		rng := rand.New(rand.NewPCG(1, 2))
+		now := mono.Time(0)
+		allowed := 0
+		for i := range 100000 {
+			// Events about 4x as often as the limit, on average.
+			now = now.Add(time.Duration(rng.Int64N(int64(float64(time.Second) / float64(tc.limit) / 2))))
+			got, want := lim.allow(now), ref(now)
+			if got != want {
+				t.Fatalf("limit %v burst %d: event %d at %v: allow = %v, want %v", tc.limit, tc.burst, i, now, got, want)
+			}
+			if got {
+				allowed++
+			}
+		}
+		if allowed == 0 {
+			t.Errorf("limit %v burst %d: nothing allowed", tc.limit, tc.burst)
+		}
+	}
+}
+
+// BenchmarkAllowDenied is BenchmarkAllowN with the limiter out of tokens,
+// as a logging limiter on a hot path mostly is.
+func BenchmarkAllowDenied(b *testing.B) {
+	lim := NewLimiter(Every(10*time.Second), 1)
+	now := mono.Now()
+	lim.allow(now)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

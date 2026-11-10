@@ -12,6 +12,7 @@ package rate
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tailscale.com/tstime/mono"
@@ -40,8 +41,15 @@ func Every(interval time.Duration) Limit {
 //
 // [token bucket]: https://en.wikipedia.org/wiki/Token_bucket
 type Limiter struct {
-	limit  Limit
-	burst  float64
+	limit Limit
+	burst float64
+
+	// next is a [mono.Time] before which no token will be available, as
+	// of the last denial. allow checks it without taking mu, so that a
+	// Limiter that's mostly denying, such as one for logging on a hot
+	// path, doesn't contend on mu.
+	next atomic.Int64
+
 	mu     sync.Mutex // protects following fields
 	tokens float64    // number of tokens currently in bucket
 	last   mono.Time  // the last time the limiter's tokens field was updated
@@ -62,6 +70,9 @@ func (lim *Limiter) Allow() bool {
 }
 
 func (lim *Limiter) allow(now mono.Time) bool {
+	if int64(now) < lim.next.Load() {
+		return false
+	}
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
 
@@ -85,6 +96,11 @@ func (lim *Limiter) allow(now mono.Time) bool {
 	if ok {
 		lim.last = now
 		lim.tokens = tokens
+	} else {
+		// The bucket is short of one token by -tokens, which it gains in
+		// -tokens/limit seconds.
+		wait := time.Duration(-tokens / float64(lim.limit) * float64(time.Second))
+		lim.next.Store(int64(now.Add(wait)))
 	}
 	return ok
 }
